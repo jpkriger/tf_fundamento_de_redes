@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  # 1. O contêiner que roda o seu monitor
+  monitor:
+    image: python:3.10-slim
+    container_name: monitor
+    working_dir: /app
+    volumes:
+      - ./monitor.py:/app/monitor.py
+      - ./:/app/
+    networks:
+      - lab-rede
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    # O comando para iniciar seu monitor
+    # "eth0" é o nome padrão da interface dentro do contêiner
+    command: ["python3", "monitor.py", "eth0"]
+
+
+  client:
+    image: nicolaka/netshoot
+    container_name: client
+    networks:
+      - lab-rede
+    depends_on:
+      - monitor
+    # Mantém o contêiner rodando para podermos "entrar" nele
+    command: ["sleep", "infinity"]
+
+networks:
+  lab-rede:
+    driver: bridge
