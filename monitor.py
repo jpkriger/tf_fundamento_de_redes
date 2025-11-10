@@ -32,55 +32,133 @@ def format_ipv6(addr_bytes):
 def parse_dns(payload):
     """
     Decodifica o payload da camada 7 como DNS (binário).
-    Extrai o nome da query da primeira pergunta (Question).
+    Extrai a query (com tipo) ou a primeira resposta (A, AAAA, CNAME).
     """
     try:
-        # O cabeçalho DNS tem 12 bytes
-        # Unpack: ! (Network Byte Order)
-        # H (unsigned short, 2 bytes) x 6
+        # Cabeçalho DNS (12 bytes)
         # (ID, Flags, QDCOUNT, ANCOUNT, NSCOUNT, ARCOUNT)
         header = struct.unpack('!HHHHHH', payload[:12])
+        flags_word = header[1]
         qdcount = header[2]  # Question Count
+        ancount = header[3]  # Answer Count
         
-        # Se não houver perguntas, é uma resposta ou outro tipo de pacote
+        # Checa o bit QR (0x8000) para ver se é uma resposta
+        is_response = (flags_word & 0x8000) != 0
+        
         if qdcount == 0:
-            return "Resposta DNS"
+            return "Pacote DNS (sem query)"
 
-        # Pula o cabeçalho de 12 bytes para encontrar a query
+        # --- 1. Parsear a Seção da Pergunta (Query) ---
         offset = 12
-        query_name = ""
+        (query_name, offset) = _dns_parse_name(payload, offset)
         
-        # Loop para decodificar o nome da query
-        # O formato é: 3www6google3com0
-        while True:
-            # Pega o tamanho da próxima label (ex: 3 para "www")
-            length = payload[offset]
+        # --- MODIFICAÇÃO AQUI ---
+        # Em vez de pular 4 bytes, lemos o QTYPE e QCLASS
+        # ! H (QTYPE) H (QCLASS)
+        q_header = struct.unpack('!HH', payload[offset:offset+4])
+        qtype = q_header[0]
+        # qclass = q_header[1] # Não precisamos, mas está aqui
+        offset += 4 
+        
+        # Mapear os tipos de query mais comuns
+        qtype_map = {
+            1: 'A',
+            28: 'AAAA',
+            5: 'CNAME',
+            15: 'MX',
+            16: 'TXT',
+            12: 'PTR',
+            2: 'NS'
+        }
+        qtype_str = qtype_map.get(qtype, f'Tipo {qtype}')
+        # --- FIM DA MODIFICAÇÃO ---
+
+        if not is_response:
+            # Agora a query inclui o tipo!
+            return f"Query ({qtype_str}): {query_name}"
+
+        # --- 2. É uma Resposta, vamos parsear a Seção de Resposta ---
+        if ancount == 0:
+            # A resposta também deve incluir o tipo de query
+            return f"Resposta para ({qtype_str}) {query_name} (sem respostas)"
+
+        # 'offset' agora está no início do primeiro Answer Record
+        (answer_name, offset) = _dns_parse_name(payload, offset)
+        
+        # Parsear o resto do cabeçalho da Resposta (10 bytes)
+        # ! H (Type) H (Class) I (TTL) H (RDLength)
+        ans_header = struct.unpack('!HHIH', payload[offset:offset+10])
+        ans_type = ans_header[0]
+        ans_rdlength = ans_header[3]
+        offset += 10 # Pular para os dados da resposta (RDATA)
+        
+        rdata = payload[offset : offset + ans_rdlength]
+
+        # --- 3. Decodificar os Dados da Resposta (RDATA) ---
+        if ans_type == 1: # A Record (IPv4)
+            ip = socket.inet_ntoa(rdata)
+            return f"Resposta (A): {answer_name} -> {ip}"
+        
+        elif ans_type == 28: # AAAA Record (IPv6)
+            ip = socket.inet_ntop(socket.AF_INET6, rdata)
+            return f"Resposta (AAAA): {answer_name} -> {ip}"
             
-            # Se o tamanho for 0, é o fim do nome
-            if length == 0:
-                offset += 1 # Pular o byte nulo
-                break
-                
-            # Detecção de ponteiro de compressão DNS (0xc0)
-            # Se os 2 primeiros bits são 11, é um ponteiro
-            if (length & 0xc0) == 0xc0:
-                # Um parser completo seguiria o ponteiro,
-                # mas para este log, apenas indicamos que ele existe.
-                query_name += "<ponteiro>"
-                offset += 2 # Pular os 2 bytes do ponteiro
-                break
+        elif ans_type == 5: # CNAME Record
+            (cname, _) = _dns_parse_name(payload, offset)
+            return f"Resposta (CNAME): {answer_name} -> {cname}"
+        
+        else:
+            # Outros tipos de record (MX, TXT, etc.)
+            ans_type_str = qtype_map.get(ans_type, f'Tipo {ans_type}')
+            return f"Resposta ({ans_type_str}) para ({qtype_str}) {query_name}"
 
-            # É uma label normal
-            offset += 1 # Pular o byte de tamanho
-            # Lê o pedaço do nome (ex: "www")
-            query_name += payload[offset : offset + length].decode('latin-1') + "."
+    except Exception as e:
+        return f"Erro ao parsear DNS: {e}"
+    
+def _dns_parse_name(payload, offset):
+    """
+    Função auxiliar para decodificar um nome DNS (ex: 'www.google.com').
+    Lida com labels (ex: 3www6google3com0) e ponteiros de compressão.
+    
+    Retorna (nome_decodificado, novo_offset_apos_nome)
+    """
+    name_parts = []
+    original_offset = offset
+    followed_pointer = False
+
+    while True:
+        length = payload[offset]
+        if length == 0: # Fim do nome (byte nulo)
+            offset += 1
+            break
+        
+        # Checa se é um ponteiro (primeiros 2 bits são 11)
+        if (length & 0xC0) == 0xC0:
+            # É um ponteiro. Lê o offset de 2 bytes
+            pointer_offset = struct.unpack('!H', payload[offset:offset+2])[0]
+            # Remove os 2 bits da flag (11xxxxxx) para pegar o offset real
+            pointer_offset &= 0x3FFF
+            
+            # Chama recursivamente para ler o nome apontado
+            # (Não passamos o offset, pois a recursão não avança o offset principal)
+            (pointed_name, _) = _dns_parse_name(payload, pointer_offset)
+            name_parts.append(pointed_name)
+            
+            offset += 2 # Avança 2 bytes (o ponteiro)
+            followed_pointer = True
+            break # Um ponteiro é sempre o fim de um nome/label
+        else:
+            # É uma label normal (tamanho 0-63)
+            offset += 1
+            name_parts.append(payload[offset : offset + length].decode('latin-1'))
             offset += length
-
-        # Remove o último "." (ex: "www.google.com.")
-        return f"Query: {query_name.rstrip('.')}"
-
-    except Exception:
-        return "Erro ao parsear DNS"
+    
+    # Se seguimos um ponteiro, o novo offset é 2 bytes após o início.
+    # Se não, é onde o loop parou (após o byte 0).
+    if followed_pointer:
+        return (".".join(name_parts), original_offset + 2)
+    else:
+        return (".".join(name_parts), offset)
     
 def parse_http(payload):
     """
@@ -201,7 +279,6 @@ def get_app_protocol(src_port, dst_port):
 def parse_application_layer(payload, ip_src, ip_dst, size, protocol_name, writers):
     """
     Loga protocolos da camada de aplicação e chama parsers de DPI.
-    [cite_start][cite: 38-43]
     """
     PACKET_COUNTERS[protocol_name] += 1
     
@@ -281,7 +358,7 @@ def parse_transport_layer(payload, ip_src, ip_dst, size, protocol_id, writers):
 def parse_network_layer(packet_data, writers):
     """
     Decodifica a Camada de Rede (IPv4, IPv6, ICMP).
-    [cite: 23-28]
+    
     """
     timestamp = get_timestamp()
 
@@ -316,7 +393,7 @@ def parse_network_layer(packet_data, writers):
             # --- Parse ICMP (baseado em IPv4) ---
             if protocol_id == 1:
                 PACKET_COUNTERS['ICMP'] += 1
-                # ICMP não tem "Protocolo Superior" no log de exemplo [cite: 73]
+                # ICMP não tem "Protocolo Superior" no log de exemplo 
                 log_data_icmp = [timestamp, 'ICMP', ip_src, ip_dst, '', total_size]
                 writers['net'].writerow(log_data_icmp)
             
@@ -358,7 +435,7 @@ def parse_network_layer(packet_data, writers):
             # O "Next Header" para ICMPv6 é 58
             if protocol_id == 58:
                 PACKET_COUNTERS['ICMPV6'] += 1 # Contamos como 'ICMP6'
-                # ICMP não tem "Protocolo Superior" no log de exemplo [cite: 73]
+                # ICMP não tem "Protocolo Superior" no log de exemplo 
                 log_data_icmp = [timestamp, 'ICMPV6', ip_src, ip_dst, '', total_size]
                 writers['net'].writerow(log_data_icmp)
             
@@ -411,7 +488,7 @@ def main():
         print("Raw sockets requerem privilégios de administrador.")
         sys.exit(1)
 
-    # 2. Verificar argumento de linha de comando [cite: 48, 49]
+    # 2. Verificar argumento de linha de comando
     if len(sys.argv) < 2:
         print("Erro: Forneça o nome da interface de rede.")
         print(f"Exemplo: sudo {sys.argv[0]} enp4s0")
@@ -422,7 +499,7 @@ def main():
     # 3. Inicializar arquivos CSV
     csv_files, csv_writers = init_csv_files()
 
-    # 4. Criar o Raw Socket [cite: 6]
+    # 4. Criar o Raw Socket
     try:
         # socket.AF_PACKET: Permite acesso à camada de enlace (Link Layer)
         # socket.SOCK_RAW:   Queremos o pacote "cru"
@@ -462,7 +539,7 @@ def main():
                 update_text_ui()
                 packet_count_since_ui_update = 0
                 
-                # Garante que os logs sejam escritos em disco [cite: 44]
+                # Garante que os logs sejam escritos em disco 
                 for f in csv_files.values():
                     f.flush()
 
