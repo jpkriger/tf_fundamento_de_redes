@@ -120,7 +120,7 @@ def _dns_parse_name(payload, offset):
     Decodifica um nome DNS (ex: 'www.google.com').
     Formato: cada label é prefixado por seu tamanho em 1 byte.
     Exemplo binário: 3www6google3com0 = www.google.com
-    Também trata ponteiros de compressão (primeiros 2 bits = 11).
+    03 77 77 77 06 67 6f 6f 67 6c 65 03 63 6f 6d 00
     
     Retorna (nome_decodificado, novo_offset_apos_nome)
     """
