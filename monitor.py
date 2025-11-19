@@ -8,7 +8,6 @@ from collections import defaultdict
 
 PACKET_COUNTERS = defaultdict(int)
 
-# Funções auxiliares de formatação
 def get_timestamp():
     """Retorna o timestamp atual formatado."""
     return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
