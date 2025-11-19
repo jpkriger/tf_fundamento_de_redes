@@ -1,5 +1,4 @@
 services:
-  # 1. O contêiner que roda o seu monitor
   monitor:
     build: .
     container_name: monitor
@@ -15,7 +14,6 @@ services:
     privileged: true
     command: ["python3", "monitor.py", "eth0"]
 
-  # 2. O contêiner "cliente" para gerar tráfego
   client:
     build: .
     container_name: client
