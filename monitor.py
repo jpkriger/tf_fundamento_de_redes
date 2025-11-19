@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import socket
 import struct
 import sys
@@ -7,11 +6,9 @@ import csv
 import datetime
 from collections import defaultdict
 
-# Dicionário de contadores para a UI
 PACKET_COUNTERS = defaultdict(int)
 
-# --- Funções Auxiliares de Formatação ---
-
+# Funções auxiliares de formatação
 def get_timestamp():
     """Retorna o timestamp atual formatado."""
     return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -52,12 +49,9 @@ def parse_dns(payload):
         if qdcount == 0:
             return "Pacote DNS (sem query)"
 
-        # 1. Parsear a seção de pergunta
         offset = 12
         (query_name, offset) = _dns_parse_name(payload, offset)
         
-        # Após o nome vem QTYPE (2 bytes) e QCLASS (2 bytes)
-        # QTYPE: 1=A(IPv4), 28=AAAA(IPv6), 5=CNAME, 15=MX, 16=TXT, 12=PTR, 2=NS
         q_header = struct.unpack('!HH', payload[offset:offset+4])
         qtype = q_header[0]
         offset += 4 
@@ -76,11 +70,9 @@ def parse_dns(payload):
         if not is_response:
             return f"Query ({qtype_str}): {query_name}"
 
-        # 2. Parsear seção de resposta se existir
         if ancount == 0:
             return f"Resposta para ({qtype_str}) {query_name} (sem respostas)"
 
-        # Está no início do primeiro Answer Record
         (answer_name, offset) = _dns_parse_name(payload, offset)
         
         # Answer Record com 10 bytes:
@@ -95,7 +87,6 @@ def parse_dns(payload):
         
         rdata = payload[offset : offset + ans_rdlength]
 
-        # 3. Decodificar os dados da resposta (RDATA) conforme o tipo
         if ans_type == 1:
             ip = socket.inet_ntoa(rdata)
             return f"Resposta (A): {answer_name} -> {ip}"
@@ -153,7 +144,6 @@ def _dns_parse_name(payload, offset):
             followed_pointer = True
             break
         else:
-            # Label normal: byte de tamanho (0-63) seguido pelos caracteres
             offset += 1
             name_parts.append(payload[offset : offset + length].decode('latin-1'))
             offset += length
@@ -189,8 +179,6 @@ def parse_http(payload):
         return "Fragmento HTTP"
     except Exception:
         return "Payload HTTP (binário/malformado)"
-
-# --- Funções de UI e Log ---
 
 def init_csv_files():
     """
@@ -229,9 +217,6 @@ def init_csv_files():
 
 def update_text_ui():
     """Limpa a tela e exibe os contadores de pacotes."""
-    # Usar 'clear' ou 'cls' pode ser disruptivo. 
-    # Vamos apenas imprimir blocos novos.
-    # os.system('clear') 
     print("\n" + "="*50) 
     print(f"--- 🛰️ ATUALIZAÇÃO DO MONITOR @ {get_timestamp()} ---")
     print(f"Monitorando interface: {sys.argv[1]}\n")
@@ -241,7 +226,6 @@ def update_text_ui():
     if not PACKET_COUNTERS:
         print("Aguardando pacotes...")
     
-    # Ordena os contadores por contagem (maior primeiro)
     sorted_counters = sorted(
         PACKET_COUNTERS.items(), 
         key=lambda item: item[1], 
@@ -272,8 +256,6 @@ def get_app_protocol(src_port, dst_port):
         return 'HTTPS'
     return 'Outro'
 
-# --- Funções Principais de Parsing ---
-
 def parse_application_layer(payload, ip_src, ip_dst, size, protocol_name, writers):
     """
     Loga protocolos da camada de aplicação.
@@ -302,7 +284,6 @@ def parse_transport_layer(payload, ip_src, ip_dst, size, protocol_id, writers):
     timestamp = get_timestamp()
     
     try:
-        # Protocolo 6 = TCP
         if protocol_id == 6:
             PACKET_COUNTERS['TCP'] += 1
             # Cabeçalho TCP com 20 bytes mínimo:
@@ -330,7 +311,6 @@ def parse_transport_layer(payload, ip_src, ip_dst, size, protocol_id, writers):
             app_proto = get_app_protocol(src_port, dst_port)
             parse_application_layer(l7_payload, ip_src, ip_dst, size, app_proto, writers)
 
-        # Protocolo 17 = UDP
         elif protocol_id == 17:
             PACKET_COUNTERS['UDP'] += 1
             # Cabeçalho UDP com 8 bytes fixo:
@@ -351,7 +331,6 @@ def parse_transport_layer(payload, ip_src, ip_dst, size, protocol_id, writers):
             parse_application_layer(l7_payload, ip_src, ip_dst, size, app_proto, writers)
             
     except struct.error:
-        # Pacote malformado ou muito pequeno
         PACKET_COUNTERS['Transport Error'] += 1
 
 def parse_network_layer(packet_data, writers):
@@ -360,7 +339,6 @@ def parse_network_layer(packet_data, writers):
     """
     timestamp = get_timestamp()
 
-    # EtherType 0x0800 = IPv4
     if packet_data['ethertype'] == 0x0800:
         PACKET_COUNTERS['IPv4'] += 1
         
@@ -392,7 +370,6 @@ def parse_network_layer(packet_data, writers):
             log_data = [timestamp, 'IPv4', ip_src, ip_dst, protocol_id, total_size]
             writers['net'].writerow(log_data)
             
-            # ICMP (protocolo 1): não encapsula protocolos superiores
             if protocol_id == 1:
                 PACKET_COUNTERS['ICMP'] += 1
                 log_data_icmp = [timestamp, 'ICMP', ip_src, ip_dst, '', total_size]
@@ -468,9 +445,6 @@ def parse_link_layer(packet_bytes, writers):
     except struct.error:
         PACKET_COUNTERS['Link Error'] += 1
 
-
-# --- Função Principal ---
-
 def main():
     if os.geteuid() != 0:
         print("Erro: Este script deve ser executado como root (use sudo).")
@@ -518,7 +492,7 @@ def main():
                     f.flush()
 
     except KeyboardInterrupt:
-        print("\n--- 🛑 Parando o monitor ---")
+        print("\n--- Parando o monitor ---")
     except Exception as e:
         print(f"\nErro inesperado: {e}")
     finally:
