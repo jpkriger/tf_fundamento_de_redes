@@ -153,6 +153,65 @@ def _dns_parse_name(payload, offset):
     else:
         return (".".join(name_parts), offset)
     
+def parse_icmp(payload):
+    """
+    Extrai informações do ICMP.
+    """
+    try:
+        if len(payload) < 8:
+            return ""
+        
+        # Cabeçalho ICMP:
+        # Byte 0: Tipo
+        # Byte 1: Código
+        # Bytes 2-3: Checksum
+        icmp_type = payload[0]
+        icmp_code = payload[1]
+        
+        icmp_types = {
+            0: 'Echo Reply',
+            3: 'Destination Unreachable',
+            4: 'Source Quench',
+            5: 'Redirect',
+            8: 'Echo Request',
+            11: 'Time Exceeded',
+            12: 'Parameter Problem'
+        }
+        
+        type_name = icmp_types.get(icmp_type, f'Type {icmp_type}')
+        return f"{type_name} (Code {icmp_code})"
+    except:
+        return ""
+
+def parse_icmpv6(payload):
+    """
+    Extrai informações do ICMPv6.
+    """
+    try:
+        if len(payload) < 8:
+            return ""
+        
+        icmp_type = payload[0]
+        icmp_code = payload[1]
+        
+        icmpv6_types = {
+            1: 'Destination Unreachable',
+            2: 'Packet Too Big',
+            3: 'Time Exceeded',
+            4: 'Parameter Problem',
+            128: 'Echo Request',
+            129: 'Echo Reply',
+            133: 'Router Solicitation',
+            134: 'Router Advertisement',
+            135: 'Neighbor Solicitation',
+            136: 'Neighbor Advertisement'
+        }
+        
+        type_name = icmpv6_types.get(icmp_type, f'Type {icmp_type}')
+        return f"{type_name} (Code {icmp_code})"
+    except:
+        return ""
+
 def parse_http(payload):
     """
     Extrai informação de requisição ou resposta HTTP.
@@ -184,9 +243,9 @@ def init_csv_files():
     Cria os arquivos CSV e escreve os cabeçalhos se não existirem.
     """
     csv_files = {
-        'net': ('camada_internet.csv', ['Data/Hora', 'Protocolo', 'IP Origem', 'IP Destino', 'Protocolo Superior', 'Tamanho']),
+        'net': ('camada_internet.csv', ['Data/Hora', 'Protocolo', 'IP Origem', 'IP Destino', 'Protocolo Superior', 'Outras Informações', 'Tamanho']),
         'trans': ('camada_transporte.csv', ['Data/Hora', 'Protocolo', 'IP Origem', 'Porta Origem', 'IP Destino', 'Porta Destino', 'Tamanho']),
-        'app': ('camada_aplicacao.csv', ['Data/Hora', 'Protocolo', 'IP Origem', 'IP Destino', 'Detalhes', 'Tamanho'])
+        'app': ('camada_aplicacao.csv', ['Data/Hora', 'Protocolo', 'Informações do Protocolo'])
     }
     
     writers = {}
@@ -216,7 +275,10 @@ def init_csv_files():
 
 def update_text_ui():
     """Limpa a tela e exibe os contadores de pacotes."""
-    print("\n" + "="*50) 
+    # Limpa o terminal (funciona em Linux/Unix/Mac)
+    os.system('clear')
+    
+    print("="*50) 
     print(f"--- 🛰️ ATUALIZAÇÃO DO MONITOR @ {get_timestamp()} ---")
     print(f"Monitorando interface: {sys.argv[1]}\n")
     print("Contagem de Pacotes por Protocolo:")
@@ -270,9 +332,13 @@ def parse_application_layer(payload, ip_src, ip_dst, size, protocol_name, writer
         details = parse_dns(payload)
     elif protocol_name == 'HTTPS':
         details = "Tráfego Criptografado (TLS)"
+    elif protocol_name == 'DHCP':
+        details = "Pacote DHCP"
+    elif protocol_name == 'NTP':
+        details = "Sincronização de tempo NTP"
     
     if protocol_name != 'Outro':
-        log_data = [timestamp, protocol_name, ip_src, ip_dst, details, size]
+        log_data = [timestamp, protocol_name, details]
         writers['app'].writerow(log_data)
 
 
@@ -332,17 +398,26 @@ def parse_transport_layer(payload, ip_src, ip_dst, size, protocol_id, writers):
     except struct.error:
         PACKET_COUNTERS['Transport Error'] += 1
 
-def parse_network_layer(packet_data, writers):
+def parse_network_layer(raw_packet, writers):
     """
-    Decodifica camada de rede: IPv4, IPv6, ICMP.
+    Decodifica camada de rede: IPv4, IPv6, ICMP, ICMPv6.
+    Assume que raw_packet começa diretamente no cabeçalho IP.
     """
     timestamp = get_timestamp()
+    
+    # Detecta a versão do IP pelo primeiro byte (4 bits superiores)
+    try:
+        version = (raw_packet[0] >> 4) & 0xF
+    except (IndexError, struct.error):
+        PACKET_COUNTERS['Network Error'] += 1
+        return
 
-    if packet_data['ethertype'] == 0x0800:
+    # IPv4 (versão 4)
+    if version == 4:
         PACKET_COUNTERS['IPv4'] += 1
         
         try:
-            header_data = packet_data['payload'][:20]
+            header_data = raw_packet[:20]
             
             # Cabeçalho IPv4 com 20 bytes mínimo:
             # Byte 0: Versão (4 bits) + IHL (4 bits) (B)
@@ -364,27 +439,31 @@ def parse_network_layer(packet_data, writers):
             ip_dst = format_ipv4(header[9])
             
             ihl_bytes = (version_ihl & 0xF) * 4
-            ip_payload = packet_data['payload'][ihl_bytes:]
+            ip_payload = raw_packet[ihl_bytes:]
 
-            log_data = [timestamp, 'IPv4', ip_src, ip_dst, protocol_id, total_size]
-            writers['net'].writerow(log_data)
+            # Identifica protocolo superior
+            protocol_names = {1: 'ICMP', 6: 'TCP', 17: 'UDP', 41: 'IPv6', 47: 'GRE', 50: 'ESP', 51: 'AH'}
+            protocol_name = protocol_names.get(protocol_id, str(protocol_id))
             
             if protocol_id == 1:
                 PACKET_COUNTERS['ICMP'] += 1
-                log_data_icmp = [timestamp, 'ICMP', ip_src, ip_dst, '', total_size]
-                writers['net'].writerow(log_data_icmp)
+                icmp_info = parse_icmp(ip_payload)
+                log_data = [timestamp, 'ICMP', ip_src, ip_dst, protocol_name, icmp_info, total_size]
+                writers['net'].writerow(log_data)
             else:
+                log_data = [timestamp, 'IPv4', ip_src, ip_dst, protocol_name, '', total_size]
+                writers['net'].writerow(log_data)
                 parse_transport_layer(ip_payload, ip_src, ip_dst, total_size, protocol_id, writers)
 
         except struct.error:
             PACKET_COUNTERS['IPv4 Error'] += 1
 
-    # EtherType 0x86DD = IPv6
-    elif packet_data['ethertype'] == 0x86DD:
+    # IPv6 (versão 6)
+    elif version == 6:
         PACKET_COUNTERS['IPv6'] += 1
         
         try:
-            header_data = packet_data['payload'][:40]
+            header_data = raw_packet[:40]
             
             # Cabeçalho IPv6 com 40 bytes fixo:
             # Bytes 0-3: Versão (4 bits) + Traffic Class (8 bits) + Flow Label (20 bits) (L)
@@ -400,49 +479,31 @@ def parse_network_layer(packet_data, writers):
             
             total_size = 40 + payload_size
             
-            log_data = [timestamp, 'IPv6', ip_src, ip_dst, protocol_id, total_size]
-            writers['net'].writerow(log_data)
+            ip_payload = raw_packet[40:]
             
-            ip_payload = packet_data['payload'][40:]
+            protocol_names = {6: 'TCP', 17: 'UDP', 58: 'ICMPv6', 41: 'IPv6', 43: 'Routing', 44: 'Fragment'}
+            protocol_name = protocol_names.get(protocol_id, str(protocol_id))
             
             # ICMPv6 (Next Header 58): não encapsula protocolos superiores
             if protocol_id == 58:
                 PACKET_COUNTERS['ICMPV6'] += 1
-                log_data_icmp = [timestamp, 'ICMPV6', ip_src, ip_dst, '', total_size]
-                writers['net'].writerow(log_data_icmp)
+                icmpv6_info = parse_icmpv6(ip_payload)
+                log_data = [timestamp, 'ICMPv6', ip_src, ip_dst, protocol_name, icmpv6_info, total_size]
+                writers['net'].writerow(log_data)
             else:
+                log_data = [timestamp, 'IPv6', ip_src, ip_dst, protocol_name, '', total_size]
+                writers['net'].writerow(log_data)
                 parse_transport_layer(ip_payload, ip_src, ip_dst, total_size, protocol_id, writers)
             
         except struct.error:
             PACKET_COUNTERS['IPv6 Error'] += 1
 
-    # Outros EtherTypes (ARP 0x0806, etc)
+    # Versão IP desconhecida
     else:
-        PACKET_COUNTERS['Outro (L2)'] += 1
+        PACKET_COUNTERS['Unknown IP Version'] += 1
 
 
-def parse_link_layer(packet_bytes, writers):
-    """
-    Extrai frame Ethernet e passa para camada de rede.
-    """
-    try:
-        # Cabeçalho Ethernet com 14 bytes fixo:
-        # Bytes 0-5: MAC destino (6s)
-        # Bytes 6-11: MAC origem (6s)
-        # Bytes 12-13: EtherType (H) - 0x0800=IPv4, 0x86DD=IPv6, 0x0806=ARP
-        header = struct.unpack('!6s6sH', packet_bytes[:14])
-        
-        packet_data = {
-            'mac_dst': format_mac(header[0]),
-            'mac_src': format_mac(header[1]),
-            'ethertype': header[2],
-            'payload': packet_bytes[14:]
-        }
-        
-        parse_network_layer(packet_data, writers)
-        
-    except struct.error:
-        PACKET_COUNTERS['Link Error'] += 1
+
 
 def main():
     if os.geteuid() != 0:
@@ -473,7 +534,9 @@ def main():
          sys.exit(1)
 
     print(f"--- 🛰️ Iniciando monitor na interface '{interface_name}' ---")
-    print("Capturando pacotes... Pressione Ctrl+C para parar.")
+    print("Capturando pacotes da camada de rede...")
+    print("Protocolos suportados: IP, IPv6, ICMP, ICMPv6")
+    print("Pressione Ctrl+C para parar.")
     print("Gerando logs: camada_internet.csv, camada_transporte.csv, camada_aplicacao.csv")
     
     packet_count_since_ui_update = 0
@@ -481,7 +544,27 @@ def main():
     try:
         while True:
             raw_packet, addr = s.recvfrom(65535)
-            parse_link_layer(raw_packet, csv_writers)
+            
+            if len(raw_packet) > 0:
+                # Tenta detectar versão IP no primeiro byte
+                first_byte = raw_packet[0]
+                ip_version = (first_byte >> 4) & 0xF
+                
+                # Se os 4 bits superiores são 4 ou 6, é um pacote IP direto
+                if ip_version == 4 or ip_version == 6:
+                    # Pacote começa direto no IP (camada de rede)
+                    parse_network_layer(raw_packet, csv_writers)
+                elif len(raw_packet) > 14:
+                    # Pode ter cabeçalho Ethernet, tenta extrair EtherType
+                    try:
+                        ethertype = struct.unpack('!H', raw_packet[12:14])[0]
+                        # 0x0800 = IPv4, 0x86DD = IPv6
+                        if ethertype == 0x0800 or ethertype == 0x86DD:
+                            # Pula o cabeçalho Ethernet (14 bytes)
+                            ip_packet = raw_packet[14:]
+                            parse_network_layer(ip_packet, csv_writers)
+                    except:
+                        pass
             
             packet_count_since_ui_update += 1
             if packet_count_since_ui_update >= 1:
