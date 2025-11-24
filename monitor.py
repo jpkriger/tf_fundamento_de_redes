@@ -546,21 +546,16 @@ def main():
             raw_packet, addr = s.recvfrom(65535)
             
             if len(raw_packet) > 0:
-                # Tenta detectar versão IP no primeiro byte
                 first_byte = raw_packet[0]
                 ip_version = (first_byte >> 4) & 0xF
                 
                 # Se os 4 bits superiores são 4 ou 6, é um pacote IP direto
                 if ip_version == 4 or ip_version == 6:
-                    # Pacote começa direto no IP (camada de rede)
                     parse_network_layer(raw_packet, csv_writers)
                 elif len(raw_packet) > 14:
-                    # Pode ter cabeçalho Ethernet, tenta extrair EtherType
                     try:
                         ethertype = struct.unpack('!H', raw_packet[12:14])[0]
-                        # 0x0800 = IPv4, 0x86DD = IPv6
                         if ethertype == 0x0800 or ethertype == 0x86DD:
-                            # Pula o cabeçalho Ethernet (14 bytes)
                             ip_packet = raw_packet[14:]
                             parse_network_layer(ip_packet, csv_writers)
                     except:
